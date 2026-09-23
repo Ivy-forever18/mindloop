@@ -1,29 +1,143 @@
-# MindLoop Backend
+# MindLoop EvoMap Bridge
 
-MindLoop（启念）MVP 后端：把用户意图转成一个可立即执行的下一步，并支持 Todo/Reminder、专注会话、穿戴端事件与闭环指标。
+Minimal FastAPI integration for the EvoMap hackathon API.
 
-## 本地运行
+## 1. Register a test-mode app
+
+Open <https://evomap.ai/dev/portal> and create an app with:
+
+- Redirect URI: `http://localhost:8000/oauth/callback`
+- Test mode: enabled
+- Scopes: `recipe:read gene:read reuse:query recipe:write recipe:publish`
+
+## 2. Configure
+
+```bash
+cd backend
+cp .env.example .env
+```
+
+Fill `EVOMAP_CLIENT_ID` and `EVOMAP_CLIENT_SECRET`. Never commit `.env`.
+
+If you already have a short-lived access token, set `EVOMAP_TOKEN` and skip OAuth.
+
+## 3. Run
+
+Requires Python 3.11 or newer.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[dev]'
-uvicorn app.main:app --reload
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
 ```
 
-打开 `http://127.0.0.1:8000/docs` 查看交互式 API。默认使用 SQLite，不需要外部服务或密钥。
+Visit the pendant simulator at <http://localhost:8000/> or use the interactive
+API at <http://localhost:8000/docs>. OAuth setup starts at
+<http://localhost:8000/oauth/start>.
 
-## 核心流程
+## 4. Verify recipe search
 
-- `POST /v1/tasks`：创建并拆解任务，只返回一个突出显示的当前步骤。
-- `POST /v1/tasks/{id}/actions`：完成、跳过、编辑或把当前步骤缩得更小。
-- `POST /v1/captures`：将一句文本识别为 Todo、Reminder 或任务启动意图；时间模糊时返回一次澄清问题。
-- `POST /v1/focus/sessions`：显式开启轻度/深度专注模式。
-- `POST /v1/focus/sessions/{id}/signals`：接收抽象 IMU/摄像头弱信号；达到阈值且不在冷却期时创建一次轻震指令。
-- `POST /v1/focus/sessions/{id}/respond`：忽略、需要帮助、已回来或重置两分钟。
-- `GET /v1/devices/{id}/commands`：穿戴端轮询待执行命令。
-- `GET /v1/metrics/summary`：查看 Hackathon 闭环指标。
+```bash
+curl -G 'http://localhost:8000/api/evomap/recipes/search' \
+  --data-urlencode 'q=task initiation' \
+  --data-urlencode 'limit=5'
+```
 
-## 隐私边界
+## Privacy boundary for MindLoop
 
-服务只接收结构化语义和抽象行为事件，不接收或保存原始音视频。深度模式必须在创建会话时显式传入摄像头授权。所有判断使用“可能偏离”，不进行疾病、情绪或注意力诊断。
+Only send abstract, non-medical context to EvoMap, for example:
+
+`task initiation + unclear first step + creative writing`
+
+Do not send names, diagnoses, raw speech, physiological signals, exact tasks, locations, or timestamps.
+
+## Publishing safety
+
+Draft creation is available at `POST /api/evomap/recipes/draft`.
+
+Test publishing is disabled by default. It requires:
+
+```bash
+EVOMAP_ALLOW_TEST_PUBLISH=true
+```
+
+and an `evm_client_test_...` credential. Live-mode publishing is intentionally blocked by this bridge.
+
+## MindLoop demo loop
+
+Put the ID of your approved test Recipe in `.env` and restart Uvicorn:
+
+```bash
+EVOMAP_RECIPE_ID=recipe_test_your_id
+```
+
+Start a session:
+
+```bash
+curl -X POST 'http://localhost:8000/api/mindloop/start' \
+  -H 'Content-Type: application/json' \
+  -d '{"task":"我要开始写路演方案，但不知道从哪里开始"}'
+```
+
+Copy the returned `session_id`, then send wearable feedback:
+
+```bash
+curl -X POST 'http://localhost:8000/api/mindloop/feedback' \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"session_replace_me","result":"stuck"}'
+```
+
+Use `stuck` repeatedly to shrink the action, or `done` to complete it. The
+returned `wearable_command` can be sent over USB serial/BLE. Anonymous metrics
+are available at `GET /api/mindloop/metrics`; recent events are at
+`GET /api/mindloop/events`. Raw task text is never stored.
+
+> Current behavior: `done` completes the single-step session. The planned next
+> iteration will generate a full task plan at session start, advance through
+> its stored steps without another model call, and re-plan only after `stuck`
+> or a changed goal.
+
+## AI-generated atomic steps
+
+The model gateway is separate from the Recipe OAuth credentials. Configure it
+only in the local `.env` file:
+
+```bash
+AI_BASE_URL=https://api.evomap.ai/v1
+AI_API_KEY=sk-evomap-your-key
+AI_MODEL=evomap-deepseek-v4-flash
+AI_TIMEOUT_SECONDS=20
+AI_FALLBACK_ENABLED=true
+```
+
+`POST /api/mindloop/start` asks the model for one observable action that fits
+within two minutes. A `stuck` response asks for a smaller one-minute action.
+Invalid JSON, timeouts, and gateway errors fall back to deterministic rules.
+The response field `step_source` is `ai` when the model was used and
+`rules_fallback` when the fallback handled the request.
+
+## Anonymous personalization memory
+
+MindLoop does not store chat history or raw task text. It learns from compact
+behavioral evidence grouped by task type: Done/Stuck counts, time to action,
+reduction count, and recent effective or ineffective atomic actions. This
+profile is injected into the next AI request so repeated Stuck feedback leads
+to smaller, lower-decision actions. Inspect it with:
+
+```text
+GET /api/mindloop/memory?task_type=writing
+```
+
+This URL intentionally returns raw JSON for debugging. It is not the product
+UI; open `/` for the pendant experience.
+
+## Tests
+
+```bash
+python -m unittest test_mindloop.py test_atomic_step_agent.py
+python -m pytest test_client.py -q
+```
+
+The retained early modular prototype lives under `app/` with its own tests
+under `tests/`. The current EvoMap + AI demo entry point is `main.py`.

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MindLoop 启念</title><link rel="stylesheet" href="/static/styles.css"></head>
+<body><main class="stage">
+  <header class="brand"><span class="mark"></span><span>MindLoop</span></header>
+  <div class="product-copy"><p>启念</p><h1>下一步，就现在。</h1></div>
+  <section class="pendant-wrap" aria-label="MindLoop 吊坠模拟器">
+    <div class="cord cord-left"></div><div class="cord cord-right"></div>
+    <div id="pendant" class="pendant"><div class="crown"></div><div class="case"><div class="screen">
+      <div class="screen-status"><span id="statusText">MindLoop</span><span id="clockText">09:41</span></div>
+      <section id="setupView" class="view active">
+        <div class="orb"><span></span></div><p class="kicker">想开始什么？</p>
+        <textarea id="taskInput" maxlength="1000" aria-label="输入任务" placeholder="说出一件卡住你的事">准备明天的路演</textarea>
+        <button id="startButton" class="screen-primary" type="button">开始</button>
+      </section>
+      <section id="focusView" class="view">
+        <div class="focus-head"><span id="sourceBadge">AI</span><span id="timerText">00:00</span></div>
+        <p class="step-label">只做这一件事</p><p id="actionText" class="action-text"></p>
+        <div class="thinking"><i></i><i></i><i></i></div>
+        <div class="screen-actions"><button id="doneButton" class="action done" type="button"><span>✓</span>完成</button><button id="stuckButton" class="action stuck" type="button"><span>−</span>太难了</button></div>
+        <button id="driftButton" class="drift" type="button">模拟走神</button>
+      </section>
+      <section id="nudgeView" class="view nudge-view">
+        <div class="nudge-rings"><span></span><span></span><span></span></div><p class="kicker">回来就好</p><p class="nudge-copy">继续刚才<br>唯一的下一步</p>
+        <button id="returnButton" class="screen-primary" type="button">回到任务</button>
+      </section>
+      <section id="doneView" class="view done-view">
+        <div class="done-check">✓</div><p class="kicker">完成了</p><p class="done-copy">一个小动作，<br>已经开始。</p>
+        <button id="againButton" class="screen-secondary" type="button">再来一个</button>
+      </section>
+    </div></div></div>
+  </section>
+  <p id="caption" class="caption"><span class="live-dot"></span>AI 已连接 · 所有互动都在吊坠内完成</p>
+</main><div id="toast" class="toast" role="status"></div><script src="/static/app.js"></script></body></html>
