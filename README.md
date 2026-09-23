@@ -10,7 +10,7 @@ MindLoop 是一个面向高认知负荷场景的 AI 吊坠 MVP：用户说出难
 - 用户反馈 `stuck` 后，由 AI 生成更小的动作
 - 模型超时、返回异常或网络失败时自动切换到规则兜底
 - SQLite 匿名行为记忆：Done/Stuck、响应时间、缩小次数和有效动作
-- Apple 风格吊坠网页模拟器，支持完成、太难了和模拟走神震动
+- 吊坠产品交互 Demo
 - API 文档、健康检查、匿名指标与事件查询
 - 旧版任务、提醒、专注检测与穿戴端命令原型保留在 `backend/app/`
 
@@ -31,7 +31,7 @@ backend/
 ├── llm_client.py              # OpenAI-compatible 模型客户端
 ├── evomap_client.py           # EvoMap OAuth / Recipe API 客户端
 ├── mindloop.py                # 会话、规则兜底、指标与匿名 Memory
-├── static/                    # 吊坠网页模拟器
+├── static/                    # 产品交互 Demo
 ├── test_*.py                  # 当前 AI/EvoMap/MindLoop 测试
 ├── app/                       # 早期模块化产品原型（保留）
 ├── tests/                     # 早期原型测试
