@@ -33,6 +33,7 @@ class Session:
     recipe_id: str | None
     step_source: str = "rules"
     state: str = "PRESENTING_STEP"
+    hint: str | None = None
 
 
 class MindLoopService:
@@ -146,7 +147,7 @@ class MindLoopService:
         ]
 
     @staticmethod
-    def smaller_action(task_type: str, current_action: str, reduction_count: int) -> dict[str, Any]:
+    def smaller_action(task_type: str, current_action: str, reduction_count: int) -> dict[str, Any] | None:
         levels = {
             "writing": [
                 ("只打开目标文档", "目标文档已打开"),
@@ -180,10 +181,26 @@ class MindLoopService:
             ],
         }
         options = levels[task_type]
-        start = min(max(reduction_count - 1, 0), len(options) - 1)
-        ordered = options[start:] + options[:start]
-        action, criteria = next((item for item in ordered if item[0] != current_action), ordered[0])
+        start = max(reduction_count - 1, 0)
+        if start >= len(options):
+            return None
+        remaining = options[start:]
+        selected = next((item for item in remaining if item[0] != current_action), None)
+        if not selected:
+            return None
+        action, criteria = selected
         return {"action": action, "success_criteria": criteria, "max_minutes": 1}
+
+    @staticmethod
+    def step_hint(task_type: str) -> str:
+        return {
+            "writing": "先不用写完整内容，把你最想表达的一句话小声说出来。",
+            "coding": "先不用改代码，只指出最可能相关的文件名。",
+            "communication": "先不用组织完整回复，只说出你最想让对方知道的一件事。",
+            "planning": "先不用排完整计划，只说出最先不能错过的那件事。",
+            "studying": "先不用理解全部内容，只找出这一页最醒目的一个词。",
+            "general": "先不用完成动作，只把手放到需要使用的工具旁边。",
+        }[task_type]
 
     def start(
         self, *, task: str, friction: str, generated_plan: dict[str, Any] | None = None,
@@ -228,6 +245,7 @@ class MindLoopService:
 
         current = session.steps[session.current_step_index]
         if result == "done":
+            session.hint = None
             current.status = "completed"
             self._record(session, "step_done")
             if session.current_step_index == len(session.steps) - 1:
@@ -262,6 +280,11 @@ class MindLoopService:
                 "max_minutes": current.max_minutes,
             }
             smaller = self.smaller_action(session.task_type, current.action, session.reduction_count)
+            if smaller is None:
+                session.hint = self.step_hint(session.task_type)
+                session.step_source = "hint"
+                self._record(session, "hint")
+                return {**self._response(session), "message": "这一步已经足够小，给你一个提示。"}
             replacement = [smaller, original_current, *untouched_remaining]
         completed = session.steps[:session.current_step_index]
         new_steps = [
@@ -271,6 +294,7 @@ class MindLoopService:
         session.steps = completed + new_steps
         session.plan_version += 1
         session.step_source = step_source
+        session.hint = None
         self._record(session, "stuck")
         return {**self._response(session), "message": "已调整当前和后续步骤。"}
 
@@ -291,6 +315,7 @@ class MindLoopService:
         ]
         session.plan_version += 1
         session.step_source = "ai"
+        session.hint = None
         self._record(session, "ai_replanned")
         return True
 
@@ -409,6 +434,7 @@ class MindLoopService:
             "total_steps": len(session.steps),
             "completed_steps": sum(step.status == "completed" for step in session.steps),
             "reduction_count": session.reduction_count,
+            "hint": session.hint,
             "recipe_id": session.recipe_id,
             "wearable_command": f"SHOW|{current.action}",
         }

@@ -233,6 +233,8 @@ async def mindloop_feedback(payload: MindLoopFeedbackInput, background_tasks: Ba
                 session_id=payload.session_id, result="stuck",
                 revised_steps=None, step_source="local_adjustment",
             )
+            if response.get("hint"):
+                return response
             background_tasks.add_task(
                 refine_stuck_plan, payload.session_id, response["plan_version"],
                 response["current_step_index"], context,

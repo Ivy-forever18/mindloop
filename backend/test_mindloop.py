@@ -87,6 +87,17 @@ class MindLoopTest(unittest.TestCase):
         self.assertEqual(second["step_source"], "local_adjustment")
         self.assertGreater(second["total_steps"], first["total_steps"])
 
+    def test_minimum_step_returns_hint_instead_of_cycling(self):
+        started = self.service.start(task="准备路演", friction="unclear", generated_plan=PLAN)
+        result = None
+        for _ in range(4):
+            result = self.service.feedback(
+                session_id=started["session_id"], result="stuck", step_source="local_adjustment",
+            )
+        self.assertEqual(result["step_source"], "hint")
+        self.assertTrue(result["hint"])
+        self.assertEqual(result["state"], "PRESENTING_STEP")
+
     def test_background_replan_applies_only_before_user_moves_on(self):
         started = self.service.start(task="准备路演", friction="unclear", generated_plan=PLAN)
         local = self.service.feedback(session_id=started["session_id"], result="stuck", step_source="local_adjustment")
