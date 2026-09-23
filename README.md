@@ -10,7 +10,8 @@ MindLoop 是一个面向高认知负荷场景的 AI 吊坠 MVP：用户说出难
 - 正常完成时直接推进到下一步，不重复调用模型
 - 用户反馈 `stuck` 后，只重新规划当前及后续步骤
 - 模型超时、返回异常或网络失败时自动切换到规则兜底
-- SQLite 匿名行为记忆：Done/Stuck、响应时间、缩小次数和有效动作
+- 40 秒模型超时、一次瞬时故障重试和计划质量自动修复
+- SQLite 匿名行为记忆：偏好步骤时长、常用工具、高频卡点、有效/无效动作和重规划次数
 - 吊坠产品交互 Demo
 - API 文档、健康检查、匿名指标与事件查询
 - 旧版任务、提醒、专注检测与穿戴端命令原型保留在 `backend/app/`
@@ -57,6 +58,8 @@ cp .env.example .env
 AI_BASE_URL=https://api.evomap.ai/v1
 AI_API_KEY=sk-evomap-your-key
 AI_MODEL=evomap-deepseek-v4-flash
+AI_TIMEOUT_SECONDS=40
+AI_MAX_RETRIES=1
 ```
 
 不要提交真实 `.env`。然后启动：

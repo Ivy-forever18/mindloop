@@ -61,6 +61,24 @@ class MindLoopTest(unittest.TestCase):
         started = self.service.start(task="写一份方案", friction="unclear")
         self.assertGreaterEqual(started["total_steps"], 3)
 
+    def test_memory_learns_step_size_and_stuck_position(self):
+        started = self.service.start(task="准备路演", friction="unclear", generated_plan=PLAN)
+        self.service.feedback(session_id=started["session_id"], result="done")
+        self.service.feedback(session_id=started["session_id"], result="stuck")
+        profile = self.service.memory_profile("writing")
+        self.assertEqual(profile["preferred_step_minutes"], 1.0)
+        self.assertEqual(profile["frequent_stuck_step_number"], 2)
+        self.assertIn("打开", profile["effective_action_patterns"])
+
+    def test_stuck_fallback_keeps_remaining_plan(self):
+        started = self.service.start(task="准备路演", friction="unclear", generated_plan=PLAN)
+        result = self.service.feedback(session_id=started["session_id"], result="stuck")
+        self.assertEqual(result["current_step_number"], 1)
+        self.assertEqual(result["total_steps"], 3)
+        self.assertEqual(result["action"], "只打开目标文档")
+        context = self.service.context(started["session_id"])
+        self.assertEqual([step["action"] for step in context["remaining_steps"]], ["写下标题", "检查页面"])
+
 
 if __name__ == "__main__":
     unittest.main()

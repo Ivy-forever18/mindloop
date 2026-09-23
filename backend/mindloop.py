@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,10 +45,15 @@ class MindLoopService:
         self._raw_tasks: dict[str, str] = {}
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +74,15 @@ class MindLoopService:
                 )
                 """
             )
+            existing = {row["name"] for row in connection.execute("PRAGMA table_info(mindloop_events)")}
+            migrations = {
+                "step_index": "INTEGER NOT NULL DEFAULT 0",
+                "max_minutes": "INTEGER NOT NULL DEFAULT 2",
+                "plan_version": "INTEGER NOT NULL DEFAULT 1",
+            }
+            for column, definition in migrations.items():
+                if column not in existing:
+                    connection.execute(f"ALTER TABLE mindloop_events ADD COLUMN {column} {definition}")
 
     @staticmethod
     def classify_task(task: str) -> str:
@@ -199,7 +215,21 @@ class MindLoopService:
 
         session.reduction_count += 1
         session.friction = "previous_step_still_too_large"
-        replacement = revised_steps or [self.smaller_action(session.task_type)]
+        if revised_steps:
+            replacement = revised_steps
+        else:
+            # If AI re-planning fails, shrink only the current step and keep the
+            # untouched remainder. Falling back must never collapse the goal
+            # into a one-step task.
+            untouched_remaining = [
+                {
+                    "action": step.action,
+                    "success_criteria": step.success_criteria,
+                    "max_minutes": step.max_minutes,
+                }
+                for step in session.steps[session.current_step_index + 1:]
+            ]
+            replacement = [self.smaller_action(session.task_type), *untouched_remaining]
         completed = session.steps[:session.current_step_index]
         new_steps = [
             Step(id=f"step_{len(completed) + index + 1}", status="active" if index == 0 else "pending", **step)
@@ -232,6 +262,7 @@ class MindLoopService:
                 SUM(CASE WHEN event_type='done' THEN 1 ELSE 0 END) AS done,
                 SUM(CASE WHEN event_type='stuck' THEN 1 ELSE 0 END) AS stuck,
                 AVG(CASE WHEN event_type='step_done' THEN elapsed_seconds END) AS avg_seconds,
+                AVG(CASE WHEN event_type='step_done' THEN max_minutes END) AS preferred_minutes,
                 AVG(CASE WHEN event_type='done' THEN reduction_count END) AS avg_reductions
                 FROM mindloop_events WHERE task_type=?""", (task_type,),
             ).fetchone()
@@ -243,14 +274,31 @@ class MindLoopService:
                 """SELECT action FROM mindloop_events WHERE task_type=? AND event_type='stuck'
                 ORDER BY id DESC LIMIT 3""", (task_type,),
             ).fetchall()
+            stuck_position = connection.execute(
+                """SELECT step_index, COUNT(*) AS count FROM mindloop_events
+                WHERE task_type=? AND event_type='stuck' GROUP BY step_index
+                ORDER BY count DESC, step_index ASC LIMIT 1""", (task_type,),
+            ).fetchone()
+            replans = connection.execute(
+                """SELECT AVG(plan_version - 1) AS average FROM mindloop_events
+                WHERE task_type=? AND event_type='done'""", (task_type,),
+            ).fetchone()
         sessions, done, stuck_count = summary["sessions"] or 0, summary["done"] or 0, summary["stuck"] or 0
+        effective_actions = [row["action"] for row in successful]
+        stuck_actions = [row["action"] for row in stuck]
         return {
             "task_type": task_type, "evidence_count": sessions, "done_count": done,
             "stuck_count": stuck_count, "success_rate": round(done / sessions, 2) if sessions else None,
             "avg_time_to_action_seconds": round(summary["avg_seconds"] or 0, 1),
             "avg_reduction_count": round(summary["avg_reductions"] or 0, 1),
-            "recent_effective_actions": [row["action"] for row in successful],
-            "recent_stuck_actions": [row["action"] for row in stuck],
+            "preferred_step_minutes": round(summary["preferred_minutes"] or 2, 1),
+            "preferred_tool": self._infer_preferred_tool(effective_actions),
+            "frequent_stuck_step_number": (stuck_position["step_index"] + 1) if stuck_position else None,
+            "effective_action_patterns": self._action_patterns(effective_actions),
+            "avoid_patterns": stuck_actions,
+            "avg_replans_to_success": round(replans["average"] or 0, 1),
+            "recent_effective_actions": effective_actions,
+            "recent_stuck_actions": stuck_actions,
             "guidance": "Prefer smaller steps and fewer decisions" if stuck_count > done and sessions >= 2 else "Use short observable steps",
             "privacy": "Contains anonymous action outcomes; no raw task text.",
         }
@@ -266,10 +314,28 @@ class MindLoopService:
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO mindloop_events (session_id,event_type,task_type,friction,action,
-                reduction_count,elapsed_seconds,recipe_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)""",
+                reduction_count,elapsed_seconds,recipe_id,created_at,step_index,max_minutes,plan_version)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (session.session_id, event_type, session.task_type, session.friction, current.action,
-                 session.reduction_count, self._elapsed(session), session.recipe_id, datetime.now(UTC).isoformat()),
+                 session.reduction_count, self._elapsed(session), session.recipe_id, datetime.now(UTC).isoformat(),
+                 session.current_step_index, current.max_minutes, session.plan_version),
             )
+
+    @staticmethod
+    def _infer_preferred_tool(actions: list[str]) -> str | None:
+        tools = {
+            "手机备忘录": ("手机", "备忘录"),
+            "电脑文档": ("文档", "PPT", "编辑器", "项目"),
+            "纸笔": ("纸", "笔记本", "手写"),
+        }
+        scores = {tool: sum(any(word.lower() in action.lower() for word in words) for action in actions) for tool, words in tools.items()}
+        best = max(scores, key=scores.get) if scores else None
+        return best if best and scores[best] > 0 else None
+
+    @staticmethod
+    def _action_patterns(actions: list[str]) -> list[str]:
+        verbs = ("打开", "点击", "找到", "写下", "列出", "输入", "检查", "发送", "运行", "阅读")
+        return list(dict.fromkeys(verb for action in actions for verb in verbs if action.startswith(verb)))[:3]
 
     def _response(self, session: Session) -> dict[str, Any]:
         current = self._current(session)

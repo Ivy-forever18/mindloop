@@ -1,4 +1,7 @@
+import unittest
+
 from evomap_client import EvoMapClient, _pkce_challenge
+from llm_client import LLMError, OpenAICompatibleClient
 
 
 def test_pkce_challenge_matches_rfc_example():
@@ -19,3 +22,23 @@ def test_authorization_url_is_s256():
     assert "recipe%3Aread" in url
     assert attempt.state
     assert attempt.verifier
+
+
+class RetryClient(OpenAICompatibleClient):
+    def __init__(self):
+        super().__init__(base_url="https://example.test/v1", api_key="test", model="test", max_retries=1)
+        self.calls = 0
+
+    async def _request(self, request_body):
+        self.calls += 1
+        if self.calls == 1:
+            raise LLMError("timeout", code="timeout", retryable=True)
+        return {"ok": True}
+
+
+class LLMClientTest(unittest.IsolatedAsyncioTestCase):
+    async def test_transient_failure_retries_once(self):
+        client = RetryClient()
+        result = await client.json_completion(system_prompt="test", payload={})
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(client.calls, 2)

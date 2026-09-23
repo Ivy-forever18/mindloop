@@ -8,10 +8,15 @@ class FakeClient:
     def __init__(self, result=None, error=None):
         self.result = result
         self.error = error
+        self.model = "fake-model"
+        self.calls = 0
 
     async def json_completion(self, **_):
+        self.calls += 1
         if self.error:
             raise self.error
+        if isinstance(self.result, list):
+            return self.result.pop(0)
         return self.result
 
 
@@ -37,11 +42,33 @@ class TaskPlanAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.plan.steps), 3)
 
     async def test_gateway_error_uses_fallback(self):
-        result = await TaskPlanAgent(FakeClient(error=LLMError("timeout"))).generate_plan(
+        result = await TaskPlanAgent(FakeClient(error=LLMError("timeout", code="timeout"))).generate_plan(
             task="准备路演", task_type="writing", friction="unclear_first_step", recipe_id=None,
         )
         self.assertEqual(result.source, "rules_fallback")
         self.assertIsNone(result.plan)
+        self.assertEqual(result.error_type, "timeout")
+
+    async def test_invalid_plan_is_repaired_once(self):
+        invalid = {**VALID_PLAN, "steps": [{**step, "max_minutes": 5} for step in VALID_PLAN["steps"]]}
+        client = FakeClient(result=[invalid, VALID_PLAN])
+        result = await TaskPlanAgent(client).generate_plan(
+            task="准备路演", task_type="writing", friction="unclear_first_step", recipe_id=None,
+        )
+        self.assertEqual(result.source, "ai")
+        self.assertEqual(client.calls, 2)
+
+    async def test_cognitively_heavy_first_step_is_repaired(self):
+        heavy = {**VALID_PLAN, "steps": [
+            {"action": "写下三个核心观点", "success_criteria": "已有三个观点", "max_minutes": 2},
+            *VALID_PLAN["steps"][1:],
+        ]}
+        client = FakeClient(result=[heavy, VALID_PLAN])
+        result = await TaskPlanAgent(client).generate_plan(
+            task="准备路演", task_type="writing", friction="unclear_first_step", recipe_id=None,
+        )
+        self.assertEqual(result.source, "ai")
+        self.assertEqual(client.calls, 2)
 
     async def test_replan_rejects_unchanged_first_step(self):
         current = {"action": "打开路演文档", "success_criteria": "文档已打开", "max_minutes": 1}
@@ -49,6 +76,20 @@ class TaskPlanAgentTest(unittest.IsolatedAsyncioTestCase):
             "revised_steps": [current], "reason": "缩小步骤",
         })).replan(task="准备路演", task_type="writing", completed_steps=[],
                    current_step=current, remaining_steps=[], recipe_id=None)
+        self.assertEqual(result.source, "rules_fallback")
+
+    async def test_replan_rejects_dropped_remaining_plan(self):
+        current = {"action": "写下标题", "success_criteria": "标题已显示", "max_minutes": 2}
+        result = await TaskPlanAgent(FakeClient({
+            "revised_steps": [
+                {"action": "只写一个标题词", "success_criteria": "页面已有一个词", "max_minutes": 1}
+            ],
+            "reason": "缩小步骤",
+        })).replan(
+            task="准备路演", task_type="writing", completed_steps=[], current_step=current,
+            remaining_steps=[{"action": "检查页面", "success_criteria": "页面已检查", "max_minutes": 3}],
+            recipe_id=None,
+        )
         self.assertEqual(result.source, "rules_fallback")
 
 

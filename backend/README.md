@@ -105,7 +105,8 @@ only in the local `.env` file:
 AI_BASE_URL=https://api.evomap.ai/v1
 AI_API_KEY=sk-evomap-your-key
 AI_MODEL=evomap-deepseek-v4-flash
-AI_TIMEOUT_SECONDS=20
+AI_TIMEOUT_SECONDS=40
+AI_MAX_RETRIES=1
 AI_FALLBACK_ENABLED=true
 ```
 
@@ -116,11 +117,16 @@ Invalid JSON, timeouts, and gateway errors fall back to deterministic rules.
 The response field `step_source` is `ai` when the model was used and
 `rules_fallback` when the fallback handled the request.
 
+Transient timeouts, network failures, HTTP 429/5xx responses, and invalid JSON
+are retried once. Validation failures trigger one plan-repair request. Failure
+logs contain only the error category and model name, never the API key.
+
 ## Anonymous personalization memory
 
 MindLoop does not store chat history or raw task text. It learns from compact
 behavioral evidence grouped by task type: Done/Stuck counts, time to action,
-reduction count, and recent effective or ineffective atomic actions. This
+preferred step duration, inferred tool preference, frequent stuck position,
+re-plan count, and recent effective or ineffective actions. This
 profile is injected into the next AI request so repeated Stuck feedback leads
 to smaller, lower-decision actions. Inspect it with:
 

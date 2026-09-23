@@ -47,7 +47,8 @@ llm_client = OpenAICompatibleClient(
     base_url=os.getenv("AI_BASE_URL", "https://api.evomap.ai/v1"),
     api_key=os.getenv("AI_API_KEY", ""),
     model=os.getenv("AI_MODEL", "evomap-deepseek-v4-flash"),
-    timeout_seconds=float(os.getenv("AI_TIMEOUT_SECONDS", "20")),
+    timeout_seconds=float(os.getenv("AI_TIMEOUT_SECONDS", "40")),
+    max_retries=int(os.getenv("AI_MAX_RETRIES", "1")),
 )
 plan_agent = TaskPlanAgent(
     llm_client,
@@ -101,6 +102,8 @@ async def health() -> dict[str, Any]:
         "ai": {
             "configured": llm_client.configured,
             "model": llm_client.model,
+            "timeout_seconds": llm_client.timeout_seconds,
+            "max_retries": llm_client.max_retries,
             "fallback_enabled": plan_agent.fallback_enabled,
         },
     }
