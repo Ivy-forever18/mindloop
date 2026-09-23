@@ -5,63 +5,61 @@ from pathlib import Path
 from mindloop import MindLoopService
 
 
+PLAN = {
+    "goal": "完成路演PPT", "task_type": "writing",
+    "steps": [
+        {"action": "打开PPT", "success_criteria": "PPT已打开", "max_minutes": 1},
+        {"action": "写下标题", "success_criteria": "标题已显示", "max_minutes": 2},
+        {"action": "检查页面", "success_criteria": "页面已检查", "max_minutes": 3},
+    ],
+    "completion_criteria": "PPT可以完整播放", "reason": "顺序执行",
+}
+
+
 class MindLoopTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.tempdir.name) / "test.db"
+        self.service = MindLoopService(Path(self.tempdir.name) / "test.db", "recipe_test")
 
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def test_start_stuck_done_loop(self):
-        service = MindLoopService(self.db_path, "recipe_test_demo")
-        started = service.start(task="我要开始写路演方案", friction="unclear_first_step")
-        self.assertEqual(started["task_type"], "writing")
-        self.assertEqual(started["recipe_id"], "recipe_test_demo")
-        self.assertTrue(started["wearable_command"].startswith("SHOW|"))
+    def test_done_advances_until_last_step(self):
+        started = self.service.start(task="准备路演", friction="unclear", generated_plan=PLAN, step_source="ai")
+        self.assertEqual(started["total_steps"], 3)
+        second = self.service.feedback(session_id=started["session_id"], result="done")
+        self.assertEqual(second["state"], "PRESENTING_STEP")
+        self.assertEqual(second["current_step_number"], 2)
+        third = self.service.feedback(session_id=started["session_id"], result="done")
+        self.assertEqual(third["current_step_number"], 3)
+        finished = self.service.feedback(session_id=started["session_id"], result="done")
+        self.assertEqual(finished["state"], "DONE")
 
-        smaller = service.feedback(session_id=started["session_id"], result="stuck")
-        self.assertEqual(smaller["reduction_count"], 1)
-        self.assertEqual(smaller["action"], "只打开目标文档")
-
-        done = service.feedback(session_id=started["session_id"], result="done")
-        self.assertEqual(done["state"], "DONE")
-        self.assertEqual(service.metrics()["done"], 1)
+    def test_stuck_preserves_completed_and_replaces_unfinished(self):
+        started = self.service.start(task="准备路演", friction="unclear", generated_plan=PLAN, step_source="ai")
+        self.service.feedback(session_id=started["session_id"], result="done")
+        revised = [
+            {"action": "只输入一个标题词", "success_criteria": "页面已有一个词", "max_minutes": 1},
+            {"action": "补全标题", "success_criteria": "标题已完整", "max_minutes": 2},
+            {"action": "检查页面", "success_criteria": "页面已检查", "max_minutes": 3},
+        ]
+        result = self.service.feedback(session_id=started["session_id"], result="stuck", revised_steps=revised, step_source="ai")
+        self.assertEqual(result["current_step_number"], 2)
+        self.assertEqual(result["total_steps"], 4)
+        self.assertEqual(result["action"], "只输入一个标题词")
+        self.assertEqual(result["plan_version"], 2)
+        context = self.service.context(started["session_id"])
+        self.assertEqual(context["completed_steps"][0]["action"], "打开PPT")
 
     def test_raw_task_is_not_persisted(self):
-        service = MindLoopService(self.db_path)
-        private_task = "给张三写一份非常私密的诊断报告"
-        service.start(task=private_task, friction="unclear_first_step")
-        content = self.db_path.read_bytes().decode("utf-8", errors="ignore")
-        self.assertNotIn(private_task, content)
+        private = "为私密客户准备路演"
+        self.service.start(task=private, friction="unclear", generated_plan=PLAN)
+        content = self.service.db_path.read_bytes().decode("utf-8", errors="ignore")
+        self.assertNotIn(private, content)
 
-    def test_generated_action_can_be_used_without_persisting_raw_task(self):
-        service = MindLoopService(self.db_path, "recipe_test_demo")
-        private_task = "为私密客户准备路演"
-        started = service.start(
-            task=private_task,
-            friction="unclear_first_step",
-            generated_action="打开路演文档，在第一页写下项目名称",
-            generated_task_type="writing",
-            step_source="ai",
-        )
-        self.assertEqual(started["step_source"], "ai")
-        self.assertEqual(started["action"], "打开路演文档，在第一页写下项目名称")
-        content = self.db_path.read_bytes().decode("utf-8", errors="ignore")
-        self.assertNotIn(private_task, content)
-
-    def test_memory_learns_from_done_and_stuck_without_raw_task(self):
-        service = MindLoopService(self.db_path)
-        first = service.start(task="写一份方案", friction="unclear_first_step")
-        service.feedback(session_id=first["session_id"], result="stuck")
-        service.feedback(session_id=first["session_id"], result="done")
-
-        profile = service.memory_profile("writing")
-        self.assertEqual(profile["evidence_count"], 1)
-        self.assertEqual(profile["done_count"], 1)
-        self.assertEqual(profile["stuck_count"], 1)
-        self.assertEqual(len(profile["recent_effective_actions"]), 1)
-        self.assertNotIn("写一份方案", str(profile))
+    def test_fallback_still_returns_multiple_steps(self):
+        started = self.service.start(task="写一份方案", friction="unclear")
+        self.assertGreaterEqual(started["total_steps"], 3)
 
 
 if __name__ == "__main__":

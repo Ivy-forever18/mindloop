@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from atomic_step_agent import AtomicStepAgent
+from atomic_step_agent import TaskPlanAgent
 from evomap_client import EvoMapClient, EvoMapError, OAuthAttempt
 from llm_client import OpenAICompatibleClient
 from mindloop import MindLoopService
@@ -49,7 +49,7 @@ llm_client = OpenAICompatibleClient(
     model=os.getenv("AI_MODEL", "evomap-deepseek-v4-flash"),
     timeout_seconds=float(os.getenv("AI_TIMEOUT_SECONDS", "20")),
 )
-atomic_agent = AtomicStepAgent(
+plan_agent = TaskPlanAgent(
     llm_client,
     fallback_enabled=env_bool("AI_FALLBACK_ENABLED", True),
 )
@@ -101,7 +101,7 @@ async def health() -> dict[str, Any]:
         "ai": {
             "configured": llm_client.configured,
             "model": llm_client.model,
-            "fallback_enabled": atomic_agent.fallback_enabled,
+            "fallback_enabled": plan_agent.fallback_enabled,
         },
     }
 
@@ -185,9 +185,9 @@ async def publish_recipe_test(recipe: RecipeInput):
 
 @app.post("/api/mindloop/start")
 async def mindloop_start(payload: MindLoopStartInput):
-    """Turn a vague task into one observable action without storing raw text."""
+    """Create a complete ordered plan and present only its first step."""
     task_type = mindloop.classify_task(payload.task)
-    generated = await atomic_agent.generate(
+    generated = await plan_agent.generate_plan(
         task=payload.task,
         task_type=task_type,
         friction=payload.friction,
@@ -197,35 +197,34 @@ async def mindloop_start(payload: MindLoopStartInput):
     return mindloop.start(
         task=payload.task,
         friction=payload.friction,
-        generated_action=generated.step.action if generated.step else None,
-        generated_task_type=generated.step.task_type if generated.step else None,
+        generated_plan=generated.plan.model_dump() if generated.plan else None,
         step_source=generated.source,
     )
 
 
 @app.post("/api/mindloop/feedback")
 async def mindloop_feedback(payload: MindLoopFeedbackInput):
-    """Record Done, or make the current action smaller after Stuck."""
+    """Advance locally after Done; re-plan unfinished steps only after Stuck."""
     try:
-        generated_action = None
-        step_source = "rules"
+        revised_steps = None
+        step_source = "rules_fallback"
         if payload.result == "stuck":
             context = mindloop.context(payload.session_id)
-            generated = await atomic_agent.generate(
+            generated = await plan_agent.replan(
                 task=context["task"],
                 task_type=context["task_type"],
-                friction="previous_step_still_too_large",
+                completed_steps=context["completed_steps"],
+                current_step=context["current_step"],
+                remaining_steps=context["remaining_steps"],
                 recipe_id=context["recipe_id"],
-                previous_action=context["previous_action"],
-                reduction_count=context["reduction_count"] + 1,
                 memory_profile=mindloop.memory_profile(context["task_type"]),
             )
-            generated_action = generated.step.action if generated.step else None
+            revised_steps = [step.model_dump() for step in generated.revised_steps] if generated.revised_steps else None
             step_source = generated.source
         return mindloop.feedback(
             session_id=payload.session_id,
             result=payload.result,
-            generated_action=generated_action,
+            revised_steps=revised_steps,
             step_source=step_source,
         )
     except KeyError as exc:

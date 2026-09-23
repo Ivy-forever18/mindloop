@@ -6,8 +6,9 @@ MindLoop 是一个面向高认知负荷场景的 AI 吊坠 MVP：用户说出难
 
 - EvoMap OAuth、Recipe、Gene 与复用关系 API 接入
 - 通过 EvoMap OpenAI-compatible 模型网关调用 `evomap-deepseek-v4-flash`
-- AI 生成 1–2 分钟内可完成的原子动作
-- 用户反馈 `stuck` 后，由 AI 生成更小的动作
+- AI 在任务开始时生成有顺序的完整 Steps 计划
+- 正常完成时直接推进到下一步，不重复调用模型
+- 用户反馈 `stuck` 后，只重新规划当前及后续步骤
 - 模型超时、返回异常或网络失败时自动切换到规则兜底
 - SQLite 匿名行为记忆：Done/Stuck、响应时间、缩小次数和有效动作
 - 吊坠产品交互 Demo
@@ -16,9 +17,7 @@ MindLoop 是一个面向高认知负荷场景的 AI 吊坠 MVP：用户说出难
 
 ## 当前产品边界
 
-目前 AI 使用的是“单步生成”模式：创建任务时生成一个动作，`stuck` 时缩小动作，`done` 时结束当前会话。
-
-下一阶段将升级为“预先规划完整 Steps”：AI 在任务开始时生成步骤列表，用户正常完成时直接进入下一步；只有卡住或目标变化时，AI 才调整当前及后续步骤。语音识别、VAD、实体按键、BLE 和真实震动马达尚未接入。
+目前已经使用“预先规划完整 Steps”模式：AI 在任务开始时生成步骤列表，用户正常完成时直接进入下一步；只有卡住时，AI 才调整当前及后续步骤。完成最后一步后，整个任务才结束。语音识别、VAD、实体按键、BLE 和真实震动马达尚未接入。
 
 ## 项目结构
 
@@ -27,7 +26,7 @@ MindLoop 是一个面向高认知负荷场景的 AI 吊坠 MVP：用户说出难
 ```text
 backend/
 ├── main.py                    # 当前 FastAPI 入口
-├── atomic_step_agent.py       # AI 原子步骤 Agent 与 Prompt
+├── atomic_step_agent.py       # AI 完整规划/重规划 Agent 与 Prompt
 ├── llm_client.py              # OpenAI-compatible 模型客户端
 ├── evomap_client.py           # EvoMap OAuth / Recipe API 客户端
 ├── mindloop.py                # 会话、规则兜底、指标与匿名 Memory

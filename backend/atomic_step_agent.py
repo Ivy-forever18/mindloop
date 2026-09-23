@@ -8,70 +8,131 @@ from pydantic import BaseModel, Field, ValidationError
 from llm_client import LLMError, OpenAICompatibleClient
 
 
-SYSTEM_PROMPT = """你是 MindLoop 的认知启动代理。你的目标不是替用户完成任务，
-而是降低启动摩擦，让用户在现实世界中立即做出一个可观察动作。
+TASK_TYPES = Literal["writing", "coding", "communication", "planning", "studying", "general"]
 
-决策顺序：
-1. 理解任务和当前摩擦，但不做疾病、情绪或注意力诊断。
-2. 参考 recipe_strategy 和 memory_profile；用户自己的 Done/Stuck 证据优先于通用建议。
-3. 只生成一个动作。不能使用“并且、然后、接着”串联多个动作。
-4. 动作必须以明确动词开头，例如打开、点击、找到、写下、放到。
-5. 动作必须具体、可观察、可判断完成，并能在 max_minutes 内完成。
-6. 不要求用户思考、规划、整理、完成整项任务；只降低进入任务环境的摩擦。
-7. previous_action 不为空时，说明用户反馈 Stuck。新动作必须是上一步的真子集，
-   减少点击、文字量或认知决策，不能只是换一种说法。
-8. 不输出鼓励、解释、多个选项、Markdown 或医疗建议。
-9. reason 仅供系统审计，不面向穿戴屏幕。
+PLAN_SYSTEM_PROMPT = """你是 MindLoop 的任务规划代理。用户给出一个大任务后，你要一次性生成完整、按顺序执行的行动计划。
+
+规则：
+1. 理解目标，但不做疾病、情绪或注意力诊断。
+2. 参考 memory_profile；用户自己的 Done/Stuck 证据优先于通用建议。
+3. 生成 3–7 个有先后依赖的 steps，覆盖从开始到用户目标真正完成，而不是只覆盖“开始”。
+4. 每个 step 只能包含一个现实世界中可观察、可判断完成的动作。
+5. action 必须以明确动词开头；不要使用“并且、然后、接着、以及”串联多个动作。
+6. 每步通常能在 1–5 分钟完成。复杂任务可拆得更细，但不要重复或发明用户未要求的交付物。
+7. success_criteria 描述动作完成时可直接观察到的结果，不能写主观感受。
+8. completion_criteria 描述整个大任务完成的最低可验证标准。
+9. 不输出鼓励、解释、多个方案、Markdown 或医疗建议。
 
 严格返回 JSON：
-{"task_type":"...","friction":"...","action":"...","reason":"...","max_minutes":1或2}"""
+{"goal":"...","task_type":"writing|coding|communication|planning|studying|general","steps":[{"action":"...","success_criteria":"...","max_minutes":1}],"completion_criteria":"...","reason":"..."}"""
+
+REPLAN_SYSTEM_PROMPT = """你是 MindLoop 的任务重规划代理。用户在 current_step 反馈 Stuck。
+
+规则：
+1. completed_steps 已经完成，绝不能修改、重复或要求用户重做。
+2. 只返回替换 current_step 和 remaining_steps 的 revised_steps。
+3. revised_steps 的第一个动作必须比 current_step 更小、更具体，减少点击、文字量或认知决策，不能只是换一种说法。
+4. 后续步骤仍需覆盖原目标；保留仍然合理的剩余步骤，避免无意义地全部重写。
+5. 每个 step 只有一个可观察动作，以明确动词开头，不使用“并且、然后、接着、以及”串联动作。
+6. 每步 1–5 分钟，success_criteria 必须可直接验证。
+7. 参考 memory_profile，避开 recent_stuck_actions 中反复失败的粒度。
+8. 不输出 Markdown、鼓励、解释或已完成步骤。
+
+严格返回 JSON：
+{"revised_steps":[{"action":"...","success_criteria":"...","max_minutes":1}],"reason":"..."}"""
 
 
-class AtomicStepResult(BaseModel):
-    task_type: Literal["writing", "coding", "communication", "planning", "studying", "general"]
-    friction: str = Field(min_length=2, max_length=100)
+class PlanStep(BaseModel):
     action: str = Field(min_length=2, max_length=160)
-    reason: str = Field(min_length=2, max_length=240)
+    success_criteria: str = Field(min_length=2, max_length=200)
     max_minutes: int = Field(ge=1, le=10)
 
 
+class TaskPlanResult(BaseModel):
+    goal: str = Field(min_length=2, max_length=240)
+    task_type: TASK_TYPES
+    steps: list[PlanStep] = Field(min_length=2, max_length=10)
+    completion_criteria: str = Field(min_length=2, max_length=300)
+    reason: str = Field(min_length=2, max_length=240)
+
+
+class ReplanResult(BaseModel):
+    revised_steps: list[PlanStep] = Field(min_length=1, max_length=10)
+    reason: str = Field(min_length=2, max_length=240)
+
+
 @dataclass(frozen=True)
-class AgentResult:
-    step: AtomicStepResult | None
+class PlanAgentResult:
+    plan: TaskPlanResult | None
     source: str
     error: str | None = None
 
 
-class AtomicStepAgent:
+@dataclass(frozen=True)
+class ReplanAgentResult:
+    revised_steps: list[PlanStep] | None
+    source: str
+    error: str | None = None
+
+
+class TaskPlanAgent:
     def __init__(self, client: OpenAICompatibleClient, *, fallback_enabled: bool = True) -> None:
         self.client = client
         self.fallback_enabled = fallback_enabled
 
-    async def generate(
+    async def generate_plan(
         self, *, task: str, task_type: str, friction: str, recipe_id: str | None,
-        previous_action: str | None = None, reduction_count: int = 0,
         memory_profile: dict[str, Any] | None = None,
-    ) -> AgentResult:
-        max_minutes = 2 if reduction_count == 0 else 1
-        payload: dict[str, Any] = {
+    ) -> PlanAgentResult:
+        payload = {
             "task": task,
             "task_type": task_type,
             "friction": friction,
-            "recipe_strategy": {"recipe_id": recipe_id, "max_action_minutes": max_minutes, "show_full_backlog": False},
-            "previous_action": previous_action,
-            "reduction_count": reduction_count,
-            "max_minutes": max_minutes,
+            "recipe_strategy": {"recipe_id": recipe_id, "plan_all_steps_upfront": True},
             "memory_profile": memory_profile or {"evidence_count": 0},
         }
         try:
-            raw = await self.client.json_completion(system_prompt=SYSTEM_PROMPT, payload=payload)
-            step = AtomicStepResult.model_validate(raw)
-            if step.max_minutes > max_minutes:
-                raise LLMError("AI action exceeds the requested time limit")
-            if previous_action and step.action.strip() == previous_action.strip():
-                raise LLMError("AI did not make the stuck action smaller")
-            return AgentResult(step=step, source="ai")
+            raw = await self.client.json_completion(system_prompt=PLAN_SYSTEM_PROMPT, payload=payload)
+            plan = TaskPlanResult.model_validate(raw)
+            self._validate_steps(plan.steps)
+            return PlanAgentResult(plan=plan, source="ai")
         except (LLMError, ValidationError) as exc:
             if not self.fallback_enabled:
                 raise
-            return AgentResult(step=None, source="rules_fallback", error=str(exc))
+            return PlanAgentResult(plan=None, source="rules_fallback", error=str(exc))
+
+    async def replan(
+        self, *, task: str, task_type: str, completed_steps: list[dict[str, Any]],
+        current_step: dict[str, Any], remaining_steps: list[dict[str, Any]],
+        recipe_id: str | None, memory_profile: dict[str, Any] | None = None,
+    ) -> ReplanAgentResult:
+        payload = {
+            "goal": task,
+            "task_type": task_type,
+            "completed_steps": completed_steps,
+            "current_step": current_step,
+            "remaining_steps": remaining_steps,
+            "recipe_strategy": {"recipe_id": recipe_id, "preserve_completed_steps": True},
+            "memory_profile": memory_profile or {"evidence_count": 0},
+        }
+        try:
+            raw = await self.client.json_completion(system_prompt=REPLAN_SYSTEM_PROMPT, payload=payload)
+            result = ReplanResult.model_validate(raw)
+            self._validate_steps(result.revised_steps)
+            if result.revised_steps[0].action.strip() == current_step["action"].strip():
+                raise LLMError("AI did not make the stuck step smaller")
+            return ReplanAgentResult(revised_steps=result.revised_steps, source="ai")
+        except (LLMError, ValidationError) as exc:
+            if not self.fallback_enabled:
+                raise
+            return ReplanAgentResult(revised_steps=None, source="rules_fallback", error=str(exc))
+
+    @staticmethod
+    def _validate_steps(steps: list[PlanStep]) -> None:
+        actions = [step.action.strip() for step in steps]
+        if len(set(actions)) != len(actions):
+            raise LLMError("AI returned duplicate steps")
+
+
+# Backwards-compatible import name for older integrations.
+AtomicStepAgent = TaskPlanAgent

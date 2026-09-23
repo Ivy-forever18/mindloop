@@ -9,11 +9,23 @@ from uuid import uuid4
 
 
 @dataclass
+class Step:
+    id: str
+    action: str
+    success_criteria: str
+    max_minutes: int
+    status: str = "pending"
+
+
+@dataclass
 class Session:
     session_id: str
+    goal: str
     task_type: str
     friction: str
-    action: str
+    steps: list[Step]
+    current_step_index: int
+    plan_version: int
     reduction_count: int
     started_at: str
     recipe_id: str | None
@@ -22,7 +34,7 @@ class Session:
 
 
 class MindLoopService:
-    """Offline-first task-initiation loop for the hackathon demo."""
+    """Task plan state machine with offline fallback and anonymous evidence."""
 
     def __init__(self, db_path: Path, recipe_id: str | None = None) -> None:
         self.db_path = db_path
@@ -72,209 +84,229 @@ class MindLoopService:
         return "general"
 
     @staticmethod
-    def first_action(task_type: str) -> str:
-        return {
-            "writing": "打开目标文档，只写下一句话标题",
-            "coding": "打开项目，定位一个要修改的文件",
-            "communication": "打开对话框，只写一句回复草稿",
-            "planning": "新建一条待办，只写下第一件事",
-            "studying": "打开材料，只读第一个小标题",
-            "general": "打开完成这件事需要的第一个工具",
-        }[task_type]
+    def fallback_plan(task_type: str) -> list[dict[str, Any]]:
+        plans = {
+            "writing": [
+                ("打开目标文档", "目标文档已打开", 1),
+                ("写下文档标题", "页面顶部已经出现标题", 2),
+                ("列出三个核心要点", "标题下方有三个要点", 3),
+                ("为每个要点补充一句内容", "三个要点各有一句说明", 5),
+                ("从头读一遍并修正一个明显问题", "文档已完整检查一遍", 5),
+            ],
+            "coding": [
+                ("打开项目并定位相关文件", "相关文件已显示在编辑器中", 2),
+                ("写下需要改变的一个预期结果", "预期结果已记录", 2),
+                ("完成最小代码修改", "代码中已经出现目标修改", 5),
+                ("运行相关测试", "测试结果已经显示", 5),
+            ],
+            "communication": [
+                ("打开需要回复的对话", "目标对话已打开", 1),
+                ("写下一句核心回复", "输入框中已有核心句", 2),
+                ("补充一个必要细节", "回复中已有必要细节", 2),
+                ("检查后发送回复", "消息已发送", 2),
+            ],
+            "planning": [
+                ("打开待办工具", "待办工具已打开", 1),
+                ("写下最终目标", "目标已显示在待办中", 2),
+                ("列出三个关键节点", "目标下已有三个节点", 3),
+                ("为第一个节点设置时间", "第一个节点已有时间", 2),
+            ],
+            "studying": [
+                ("打开需要学习的材料", "材料已打开", 1),
+                ("读完第一个小标题的内容", "第一小节已读完", 5),
+                ("写下一句内容摘要", "摘要已经写下", 2),
+                ("完成下一小节并记录一个问题", "下一小节已读且问题已记录", 5),
+            ],
+            "general": [
+                ("打开完成任务需要的第一个工具", "所需工具已打开", 1),
+                ("找到最先需要处理的对象", "目标对象已显示", 2),
+                ("完成第一个可见改动", "第一个改动已经出现", 3),
+                ("检查结果并处理一个遗漏", "结果已检查且一个遗漏已处理", 5),
+            ],
+        }
+        return [
+            {"action": action, "success_criteria": criteria, "max_minutes": minutes}
+            for action, criteria, minutes in plans[task_type]
+        ]
 
     @staticmethod
-    def smaller_action(task_type: str, reduction_count: int) -> str:
-        levels = {
-            "writing": ["只打开目标文档", "把光标放到空白页上", "输入一个标题字符"],
-            "coding": ["只打开代码编辑器", "只打开项目目录", "点击一个相关文件"],
-            "communication": ["只打开对应的聊天或邮箱", "点进需要回复的对话", "输入一个称呼"],
-            "planning": ["只打开待办工具", "点击新建待办", "输入一个动词"],
-            "studying": ["只打开学习材料", "翻到第一页", "圈出第一个标题"],
-            "general": ["只把需要的工具打开", "把目标页面放到眼前", "完成一个点击动作"],
+    def smaller_action(task_type: str) -> dict[str, Any]:
+        actions = {
+            "writing": ("只打开目标文档", "目标文档已打开"),
+            "coding": ("只打开代码编辑器", "代码编辑器已打开"),
+            "communication": ("只打开对应的聊天或邮箱", "对应应用已打开"),
+            "planning": ("只打开待办工具", "待办工具已打开"),
+            "studying": ("只打开学习材料", "学习材料已打开"),
+            "general": ("只打开需要使用的工具", "所需工具已打开"),
         }
-        options = levels[task_type]
-        return options[min(reduction_count - 1, len(options) - 1)]
+        action, criteria = actions[task_type]
+        return {"action": action, "success_criteria": criteria, "max_minutes": 1}
 
     def start(
-        self,
-        *,
-        task: str,
-        friction: str,
-        generated_action: str | None = None,
-        generated_task_type: str | None = None,
-        step_source: str = "rules",
+        self, *, task: str, friction: str, generated_plan: dict[str, Any] | None = None,
+        step_source: str = "rules_fallback",
     ) -> dict[str, Any]:
         task_type = self.classify_task(task)
-        if generated_task_type:
-            task_type = generated_task_type
+        goal = task
+        raw_steps = self.fallback_plan(task_type)
+        completion_criteria = f"{task}已经达到可使用或可提交状态"
+        if generated_plan:
+            task_type = generated_plan["task_type"]
+            goal = generated_plan["goal"]
+            raw_steps = generated_plan["steps"]
+            completion_criteria = generated_plan["completion_criteria"]
+        steps = [
+            Step(id=f"step_{index + 1}", status="active" if index == 0 else "pending", **step)
+            for index, step in enumerate(raw_steps)
+        ]
         session = Session(
-            session_id=f"session_{uuid4().hex[:12]}",
-            task_type=task_type,
-            friction=friction,
-            action=generated_action or self.first_action(task_type),
-            reduction_count=0,
-            started_at=datetime.now(UTC).isoformat(),
-            recipe_id=self.recipe_id,
-            step_source=step_source,
+            session_id=f"session_{uuid4().hex[:12]}", goal=goal, task_type=task_type,
+            friction=friction, steps=steps, current_step_index=0, plan_version=1,
+            reduction_count=0, started_at=datetime.now(UTC).isoformat(),
+            recipe_id=self.recipe_id, step_source=step_source,
         )
         self.sessions[session.session_id] = session
-        # Needed only for a possible Stuck retry; raw text is never persisted.
         self._raw_tasks[session.session_id] = task
         self._record(session, "started")
-        return self._response(session)
+        response = self._response(session)
+        response["completion_criteria"] = completion_criteria
+        return response
 
     def feedback(
-        self,
-        *,
-        session_id: str,
-        result: str,
-        generated_action: str | None = None,
-        step_source: str = "rules",
+        self, *, session_id: str, result: str,
+        revised_steps: list[dict[str, Any]] | None = None,
+        step_source: str = "rules_fallback",
     ) -> dict[str, Any]:
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
         if session.state == "DONE":
-            raise ValueError("This session is already complete")
+            raise ValueError("This task is already complete")
+
+        current = session.steps[session.current_step_index]
         if result == "done":
-            session.state = "DONE"
-            self._record(session, "done")
-            self._raw_tasks.pop(session_id, None)
-            return {**self._response(session), "message": "已记录：这类启动策略对你有效。"}
+            current.status = "completed"
+            self._record(session, "step_done")
+            if session.current_step_index == len(session.steps) - 1:
+                session.state = "DONE"
+                self._record(session, "done")
+                self._raw_tasks.pop(session_id, None)
+                return {**self._response(session), "message": "整个任务的所有步骤已完成。"}
+            session.current_step_index += 1
+            session.steps[session.current_step_index].status = "active"
+            session.reduction_count = 0
+            return {**self._response(session), "message": "当前步骤已完成，进入下一步。"}
 
         session.reduction_count += 1
         session.friction = "previous_step_still_too_large"
-        session.action = generated_action or self.smaller_action(
-            session.task_type, session.reduction_count
-        )
+        replacement = revised_steps or [self.smaller_action(session.task_type)]
+        completed = session.steps[:session.current_step_index]
+        new_steps = [
+            Step(id=f"step_{len(completed) + index + 1}", status="active" if index == 0 else "pending", **step)
+            for index, step in enumerate(replacement)
+        ]
+        session.steps = completed + new_steps
+        session.plan_version += 1
         session.step_source = step_source
         self._record(session, "stuck")
-        return {**self._response(session), "message": "步骤已缩小。现在只做这一件事。"}
+        return {**self._response(session), "message": "已调整当前和后续步骤。"}
 
     def context(self, session_id: str) -> dict[str, Any]:
         session = self.sessions.get(session_id)
         if not session:
             raise KeyError(session_id)
+        current = session.steps[session.current_step_index]
         return {
-            "task": self._raw_tasks.get(session_id, ""),
+            "task": self._raw_tasks.get(session_id, session.goal),
             "task_type": session.task_type,
-            "friction": session.friction,
-            "previous_action": session.action,
-            "reduction_count": session.reduction_count,
+            "completed_steps": [asdict(step) for step in session.steps[:session.current_step_index]],
+            "current_step": asdict(current),
+            "remaining_steps": [asdict(step) for step in session.steps[session.current_step_index + 1:]],
             "recipe_id": session.recipe_id,
-            "state": session.state,
         }
 
     def memory_profile(self, task_type: str) -> dict[str, Any]:
-        """Return anonymous behavioral evidence for personalization."""
         with self._connect() as connection:
             summary = connection.execute(
-                """
-                SELECT COUNT(DISTINCT session_id) AS sessions,
-                  SUM(CASE WHEN event_type='done' THEN 1 ELSE 0 END) AS done,
-                  SUM(CASE WHEN event_type='stuck' THEN 1 ELSE 0 END) AS stuck,
-                  AVG(CASE WHEN event_type='done' THEN elapsed_seconds END) AS avg_seconds,
-                  AVG(CASE WHEN event_type='done' THEN reduction_count END) AS avg_reductions
-                FROM mindloop_events WHERE task_type=?
-                """,
-                (task_type,),
+                """SELECT COUNT(DISTINCT session_id) AS sessions,
+                SUM(CASE WHEN event_type='done' THEN 1 ELSE 0 END) AS done,
+                SUM(CASE WHEN event_type='stuck' THEN 1 ELSE 0 END) AS stuck,
+                AVG(CASE WHEN event_type='step_done' THEN elapsed_seconds END) AS avg_seconds,
+                AVG(CASE WHEN event_type='done' THEN reduction_count END) AS avg_reductions
+                FROM mindloop_events WHERE task_type=?""", (task_type,),
             ).fetchone()
             successful = connection.execute(
-                """
-                SELECT action FROM mindloop_events
-                WHERE task_type=? AND event_type='done'
-                ORDER BY id DESC LIMIT 3
-                """,
-                (task_type,),
+                """SELECT action FROM mindloop_events WHERE task_type=? AND event_type='step_done'
+                ORDER BY id DESC LIMIT 3""", (task_type,),
             ).fetchall()
             stuck = connection.execute(
-                """
-                SELECT action FROM mindloop_events
-                WHERE task_type=? AND event_type='stuck'
-                ORDER BY id DESC LIMIT 3
-                """,
-                (task_type,),
+                """SELECT action FROM mindloop_events WHERE task_type=? AND event_type='stuck'
+                ORDER BY id DESC LIMIT 3""", (task_type,),
             ).fetchall()
-        sessions = summary["sessions"] or 0
-        done = summary["done"] or 0
-        stuck_count = summary["stuck"] or 0
+        sessions, done, stuck_count = summary["sessions"] or 0, summary["done"] or 0, summary["stuck"] or 0
         return {
-            "task_type": task_type,
-            "evidence_count": sessions,
-            "done_count": done,
-            "stuck_count": stuck_count,
-            "success_rate": round(done / sessions, 2) if sessions else None,
+            "task_type": task_type, "evidence_count": sessions, "done_count": done,
+            "stuck_count": stuck_count, "success_rate": round(done / sessions, 2) if sessions else None,
             "avg_time_to_action_seconds": round(summary["avg_seconds"] or 0, 1),
             "avg_reduction_count": round(summary["avg_reductions"] or 0, 1),
             "recent_effective_actions": [row["action"] for row in successful],
             "recent_stuck_actions": [row["action"] for row in stuck],
-            "guidance": (
-                "Prefer a one-minute action and reduce decisions"
-                if stuck_count > done and sessions >= 2
-                else "Use a two-minute observable action"
-            ),
+            "guidance": "Prefer smaller steps and fewer decisions" if stuck_count > done and sessions >= 2 else "Use short observable steps",
             "privacy": "Contains anonymous action outcomes; no raw task text.",
         }
+
+    def _current(self, session: Session) -> Step:
+        return session.steps[min(session.current_step_index, len(session.steps) - 1)]
 
     def _elapsed(self, session: Session) -> int:
         return max(0, int((datetime.now(UTC) - datetime.fromisoformat(session.started_at)).total_seconds()))
 
     def _record(self, session: Session, event_type: str) -> None:
+        current = self._current(session)
         with self._connect() as connection:
             connection.execute(
-                """
-                INSERT INTO mindloop_events (
-                    session_id, event_type, task_type, friction, action,
-                    reduction_count, elapsed_seconds, recipe_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (session.session_id, event_type, session.task_type, session.friction,
-                 session.action, session.reduction_count, self._elapsed(session),
-                 session.recipe_id, datetime.now(UTC).isoformat()),
+                """INSERT INTO mindloop_events (session_id,event_type,task_type,friction,action,
+                reduction_count,elapsed_seconds,recipe_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (session.session_id, event_type, session.task_type, session.friction, current.action,
+                 session.reduction_count, self._elapsed(session), session.recipe_id, datetime.now(UTC).isoformat()),
             )
 
     def _response(self, session: Session) -> dict[str, Any]:
+        current = self._current(session)
         return {
-            **asdict(session),
-            "max_minutes": 2 if session.reduction_count == 0 else 1,
-            "wearable_command": f"SHOW|{session.action}",
+            "session_id": session.session_id, "goal": session.goal,
+            "task_type": session.task_type, "friction": session.friction,
+            "action": current.action, "success_criteria": current.success_criteria,
+            "max_minutes": current.max_minutes, "state": session.state,
+            "step_source": session.step_source, "plan_version": session.plan_version,
+            "current_step_index": session.current_step_index,
+            "current_step_number": session.current_step_index + 1,
+            "total_steps": len(session.steps),
+            "completed_steps": sum(step.status == "completed" for step in session.steps),
+            "reduction_count": session.reduction_count,
+            "recipe_id": session.recipe_id,
+            "wearable_command": f"SHOW|{current.action}",
         }
 
     def metrics(self) -> dict[str, Any]:
         with self._connect() as connection:
             totals = connection.execute(
-                """
-                SELECT COUNT(DISTINCT session_id) AS sessions,
-                  SUM(CASE WHEN event_type='done' THEN 1 ELSE 0 END) AS done,
-                  SUM(CASE WHEN event_type='stuck' THEN 1 ELSE 0 END) AS stuck,
-                  AVG(CASE WHEN event_type='done' THEN elapsed_seconds END) AS avg_seconds
-                FROM mindloop_events
-                """
+                """SELECT COUNT(DISTINCT session_id) AS sessions,
+                SUM(CASE WHEN event_type='done' THEN 1 ELSE 0 END) AS done,
+                SUM(CASE WHEN event_type='stuck' THEN 1 ELSE 0 END) AS stuck,
+                AVG(CASE WHEN event_type='step_done' THEN elapsed_seconds END) AS avg_seconds
+                FROM mindloop_events"""
             ).fetchone()
-            by_type = connection.execute(
-                """
-                SELECT task_type,
-                  SUM(CASE WHEN event_type='done' THEN 1 ELSE 0 END) AS done,
-                  SUM(CASE WHEN event_type='stuck' THEN 1 ELSE 0 END) AS stuck
-                FROM mindloop_events GROUP BY task_type ORDER BY task_type
-                """
-            ).fetchall()
-        return {
-            "sessions": totals["sessions"] or 0,
-            "done": totals["done"] or 0,
-            "stuck": totals["stuck"] or 0,
-            "avg_time_to_action_seconds": round(totals["avg_seconds"] or 0, 1),
-            "by_task_type": [dict(row) for row in by_type],
-            "privacy": "Raw task text is not stored.",
-        }
+        return {"sessions": totals["sessions"] or 0, "done": totals["done"] or 0,
+                "stuck": totals["stuck"] or 0,
+                "avg_time_to_action_seconds": round(totals["avg_seconds"] or 0, 1),
+                "privacy": "Raw task text is not stored."}
 
     def events(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                """
-                SELECT session_id, event_type, task_type, friction, action,
-                  reduction_count, elapsed_seconds, recipe_id, created_at
-                FROM mindloop_events ORDER BY id DESC LIMIT ?
-                """, (limit,)
+                """SELECT session_id,event_type,task_type,friction,action,reduction_count,
+                elapsed_seconds,recipe_id,created_at FROM mindloop_events ORDER BY id DESC LIMIT ?""",
+                (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
