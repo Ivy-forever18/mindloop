@@ -88,13 +88,17 @@ curl -X POST 'http://localhost:8000/api/mindloop/feedback' \
   -d '{"session_id":"session_replace_me","result":"stuck"}'
 ```
 
-Use `done` to advance to the next stored step without another model call. Use
-`stuck` to re-plan only the current and remaining steps. The
+Use `done` to advance to the next stored step without another model call. A
+`stuck` response immediately inserts a smaller local step while preserving the
+original current and remaining steps; AI refinement then runs in the background. The
 returned `wearable_command` can be sent over USB serial/BLE. Anonymous metrics
 are available at `GET /api/mindloop/metrics`; recent events are at
 `GET /api/mindloop/events`. Raw task text is never stored.
 
 The task is complete only after the final stored step is marked `done`.
+
+The frontend polls `GET /api/mindloop/session/{session_id}` after Stuck and
+applies a background AI refinement only if the user has not already moved on.
 
 ## AI-generated task plans
 

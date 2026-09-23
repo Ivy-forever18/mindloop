@@ -74,10 +74,36 @@ class MindLoopTest(unittest.TestCase):
         started = self.service.start(task="准备路演", friction="unclear", generated_plan=PLAN)
         result = self.service.feedback(session_id=started["session_id"], result="stuck")
         self.assertEqual(result["current_step_number"], 1)
-        self.assertEqual(result["total_steps"], 3)
+        self.assertEqual(result["total_steps"], 4)
         self.assertEqual(result["action"], "只打开目标文档")
         context = self.service.context(started["session_id"])
-        self.assertEqual([step["action"] for step in context["remaining_steps"]], ["写下标题", "检查页面"])
+        self.assertEqual([step["action"] for step in context["remaining_steps"]], ["打开PPT", "写下标题", "检查页面"])
+
+    def test_repeated_stuck_keeps_shrinking_instead_of_repeating(self):
+        started = self.service.start(task="准备路演", friction="unclear", generated_plan=PLAN)
+        first = self.service.feedback(session_id=started["session_id"], result="stuck", step_source="local_adjustment")
+        second = self.service.feedback(session_id=started["session_id"], result="stuck", step_source="local_adjustment")
+        self.assertNotEqual(first["action"], second["action"])
+        self.assertEqual(second["step_source"], "local_adjustment")
+        self.assertGreater(second["total_steps"], first["total_steps"])
+
+    def test_background_replan_applies_only_before_user_moves_on(self):
+        started = self.service.start(task="准备路演", friction="unclear", generated_plan=PLAN)
+        local = self.service.feedback(session_id=started["session_id"], result="stuck", step_source="local_adjustment")
+        revised = [
+            {"action": "找到PPT图标", "success_criteria": "PPT图标已显示", "max_minutes": 1},
+            {"action": "打开PPT", "success_criteria": "PPT已打开", "max_minutes": 1},
+            {"action": "写下标题", "success_criteria": "标题已显示", "max_minutes": 2},
+            {"action": "检查页面", "success_criteria": "页面已检查", "max_minutes": 3},
+        ]
+        applied = self.service.apply_background_replan(
+            session_id=started["session_id"], expected_plan_version=local["plan_version"],
+            expected_step_index=local["current_step_index"], revised_steps=revised,
+        )
+        self.assertTrue(applied)
+        latest = self.service.session_response(started["session_id"])
+        self.assertEqual(latest["step_source"], "ai")
+        self.assertEqual(latest["plan_version"], local["plan_version"] + 1)
 
 
 if __name__ == "__main__":

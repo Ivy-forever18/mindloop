@@ -146,16 +146,43 @@ class MindLoopService:
         ]
 
     @staticmethod
-    def smaller_action(task_type: str) -> dict[str, Any]:
-        actions = {
-            "writing": ("只打开目标文档", "目标文档已打开"),
-            "coding": ("只打开代码编辑器", "代码编辑器已打开"),
-            "communication": ("只打开对应的聊天或邮箱", "对应应用已打开"),
-            "planning": ("只打开待办工具", "待办工具已打开"),
-            "studying": ("只打开学习材料", "学习材料已打开"),
-            "general": ("只打开需要使用的工具", "所需工具已打开"),
+    def smaller_action(task_type: str, current_action: str, reduction_count: int) -> dict[str, Any]:
+        levels = {
+            "writing": [
+                ("只打开目标文档", "目标文档已打开"),
+                ("找到目标文档图标", "目标文档图标已出现在眼前"),
+                ("把光标移到目标文档图标上", "光标已停在目标文档图标上"),
+            ],
+            "coding": [
+                ("只打开代码编辑器", "代码编辑器已打开"),
+                ("找到代码编辑器图标", "代码编辑器图标已出现在眼前"),
+                ("把光标移到代码编辑器图标上", "光标已停在图标上"),
+            ],
+            "communication": [
+                ("只打开对应的聊天或邮箱", "对应应用已打开"),
+                ("找到聊天或邮箱图标", "对应图标已出现在眼前"),
+                ("把光标移到对应图标上", "光标已停在对应图标上"),
+            ],
+            "planning": [
+                ("只打开待办工具", "待办工具已打开"),
+                ("找到待办工具图标", "待办工具图标已出现在眼前"),
+                ("把光标移到待办工具图标上", "光标已停在图标上"),
+            ],
+            "studying": [
+                ("只打开学习材料", "学习材料已打开"),
+                ("找到学习材料", "学习材料已出现在眼前"),
+                ("把学习材料放到手边", "学习材料已经触手可及"),
+            ],
+            "general": [
+                ("只打开需要使用的工具", "所需工具已打开"),
+                ("找到需要使用的工具", "所需工具已出现在眼前"),
+                ("把手移到需要使用的工具旁", "工具已经触手可及"),
+            ],
         }
-        action, criteria = actions[task_type]
+        options = levels[task_type]
+        start = min(max(reduction_count - 1, 0), len(options) - 1)
+        ordered = options[start:] + options[:start]
+        action, criteria = next((item for item in ordered if item[0] != current_action), ordered[0])
         return {"action": action, "success_criteria": criteria, "max_minutes": 1}
 
     def start(
@@ -229,7 +256,13 @@ class MindLoopService:
                 }
                 for step in session.steps[session.current_step_index + 1:]
             ]
-            replacement = [self.smaller_action(session.task_type), *untouched_remaining]
+            original_current = {
+                "action": current.action,
+                "success_criteria": current.success_criteria,
+                "max_minutes": current.max_minutes,
+            }
+            smaller = self.smaller_action(session.task_type, current.action, session.reduction_count)
+            replacement = [smaller, original_current, *untouched_remaining]
         completed = session.steps[:session.current_step_index]
         new_steps = [
             Step(id=f"step_{len(completed) + index + 1}", status="active" if index == 0 else "pending", **step)
@@ -240,6 +273,32 @@ class MindLoopService:
         session.step_source = step_source
         self._record(session, "stuck")
         return {**self._response(session), "message": "已调整当前和后续步骤。"}
+
+    def apply_background_replan(
+        self, *, session_id: str, expected_plan_version: int, expected_step_index: int,
+        revised_steps: list[dict[str, Any]],
+    ) -> bool:
+        """Apply an AI refinement only if the user has not moved on."""
+        session = self.sessions.get(session_id)
+        if not session or session.state == "DONE":
+            return False
+        if session.plan_version != expected_plan_version or session.current_step_index != expected_step_index:
+            return False
+        completed = session.steps[:session.current_step_index]
+        session.steps = completed + [
+            Step(id=f"step_{len(completed) + index + 1}", status="active" if index == 0 else "pending", **step)
+            for index, step in enumerate(revised_steps)
+        ]
+        session.plan_version += 1
+        session.step_source = "ai"
+        self._record(session, "ai_replanned")
+        return True
+
+    def session_response(self, session_id: str) -> dict[str, Any]:
+        session = self.sessions.get(session_id)
+        if not session:
+            raise KeyError(session_id)
+        return self._response(session)
 
     def context(self, session_id: str) -> dict[str, Any]:
         session = self.sessions.get(session_id)

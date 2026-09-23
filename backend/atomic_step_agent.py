@@ -100,7 +100,8 @@ class TaskPlanAgent:
         try:
             raw = await self.client.json_completion(system_prompt=PLAN_SYSTEM_PROMPT, payload=payload)
             try:
-                plan = TaskPlanResult.model_validate(raw)
+                normalized = self._normalize_candidate(raw, task_type)
+                plan = TaskPlanResult.model_validate(normalized)
                 self._validate_plan(plan)
             except (ValidationError, LLMError) as first_error:
                 issues = self._error_message(first_error)
@@ -108,7 +109,7 @@ class TaskPlanAgent:
                     system_prompt=REPAIR_SYSTEM_PROMPT,
                     payload={"task": task, "candidate_plan": raw, "validation_issues": issues},
                 )
-                plan = TaskPlanResult.model_validate(repaired)
+                plan = TaskPlanResult.model_validate(self._normalize_candidate(repaired, task_type))
                 self._validate_plan(plan)
             return PlanAgentResult(plan=plan, source="ai")
         except (LLMError, ValidationError) as exc:
@@ -161,6 +162,38 @@ class TaskPlanAgent:
             issues.append("last_step_does_not_verify_goal")
         if issues:
             raise LLMError(",".join(issues), code="quality_failed")
+
+    @staticmethod
+    def _normalize_candidate(raw: dict[str, Any], task_type: str) -> dict[str, Any]:
+        """Repair safe structural issues locally to avoid a second slow model call."""
+        candidate = dict(raw)
+        raw_steps = candidate.get("steps")
+        if not isinstance(raw_steps, list):
+            return candidate
+        steps = [dict(step) for step in raw_steps if isinstance(step, dict)]
+        for step in steps:
+            minutes = step.get("max_minutes")
+            if isinstance(minutes, (int, float)):
+                step["max_minutes"] = max(1, min(5, int(minutes)))
+        if len(steps) > 7:
+            steps = [*steps[:6], steps[-1]]
+        low_friction = ("打开", "找到", "新建", "进入", "拿出", "选择")
+        if steps and not str(steps[0].get("action", "")).startswith(low_friction):
+            setup = {
+                "writing": {"action": "打开目标文档", "success_criteria": "目标文档已打开", "max_minutes": 1},
+                "coding": {"action": "打开代码编辑器", "success_criteria": "代码编辑器已打开", "max_minutes": 1},
+                "communication": {"action": "打开对应的聊天或邮箱", "success_criteria": "对应应用已打开", "max_minutes": 1},
+                "planning": {"action": "打开待办工具", "success_criteria": "待办工具已打开", "max_minutes": 1},
+                "studying": {"action": "打开学习材料", "success_criteria": "学习材料已打开", "max_minutes": 1},
+                "general": {"action": "打开需要使用的工具", "success_criteria": "所需工具已打开", "max_minutes": 1},
+            }[task_type]
+            steps = [setup, *steps]
+            if len(steps) > 7:
+                steps = [*steps[:6], steps[-1]]
+        if steps and isinstance(steps[0].get("max_minutes"), (int, float)):
+            steps[0]["max_minutes"] = min(2, int(steps[0]["max_minutes"]))
+        candidate["steps"] = steps
+        return candidate
 
     @staticmethod
     def _validate_steps(steps: list[PlanStep]) -> None:

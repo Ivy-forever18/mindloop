@@ -6,7 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -205,35 +205,53 @@ async def mindloop_start(payload: MindLoopStartInput):
     )
 
 
+async def refine_stuck_plan(
+    session_id: str, expected_plan_version: int, expected_step_index: int,
+    context: dict[str, Any],
+) -> None:
+    generated = await plan_agent.replan(
+        task=context["task"], task_type=context["task_type"],
+        completed_steps=context["completed_steps"], current_step=context["current_step"],
+        remaining_steps=context["remaining_steps"], recipe_id=context["recipe_id"],
+        memory_profile=mindloop.memory_profile(context["task_type"]),
+    )
+    if generated.revised_steps:
+        mindloop.apply_background_replan(
+            session_id=session_id, expected_plan_version=expected_plan_version,
+            expected_step_index=expected_step_index,
+            revised_steps=[step.model_dump() for step in generated.revised_steps],
+        )
+
+
 @app.post("/api/mindloop/feedback")
-async def mindloop_feedback(payload: MindLoopFeedbackInput):
-    """Advance locally after Done; re-plan unfinished steps only after Stuck."""
+async def mindloop_feedback(payload: MindLoopFeedbackInput, background_tasks: BackgroundTasks):
+    """Advance after Done; shrink immediately and refine in background after Stuck."""
     try:
-        revised_steps = None
-        step_source = "rules_fallback"
         if payload.result == "stuck":
             context = mindloop.context(payload.session_id)
-            generated = await plan_agent.replan(
-                task=context["task"],
-                task_type=context["task_type"],
-                completed_steps=context["completed_steps"],
-                current_step=context["current_step"],
-                remaining_steps=context["remaining_steps"],
-                recipe_id=context["recipe_id"],
-                memory_profile=mindloop.memory_profile(context["task_type"]),
+            response = mindloop.feedback(
+                session_id=payload.session_id, result="stuck",
+                revised_steps=None, step_source="local_adjustment",
             )
-            revised_steps = [step.model_dump() for step in generated.revised_steps] if generated.revised_steps else None
-            step_source = generated.source
-        return mindloop.feedback(
-            session_id=payload.session_id,
-            result=payload.result,
-            revised_steps=revised_steps,
-            step_source=step_source,
-        )
+            background_tasks.add_task(
+                refine_stuck_plan, payload.session_id, response["plan_version"],
+                response["current_step_index"], context,
+            )
+            return response
+        return mindloop.feedback(session_id=payload.session_id, result="done")
     except KeyError as exc:
         raise HTTPException(404, "Session not found or server was restarted") from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/mindloop/session/{session_id}")
+async def mindloop_session(session_id: str):
+    """Return the latest step, including an optional background AI refinement."""
+    try:
+        return mindloop.session_response(session_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Session not found or server was restarted") from exc
 
 
 @app.get("/api/mindloop/metrics")

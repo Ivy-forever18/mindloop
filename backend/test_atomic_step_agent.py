@@ -49,14 +49,15 @@ class TaskPlanAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.plan)
         self.assertEqual(result.error_type, "timeout")
 
-    async def test_invalid_plan_is_repaired_once(self):
+    async def test_safe_duration_issue_is_repaired_locally(self):
         invalid = {**VALID_PLAN, "steps": [{**step, "max_minutes": 5} for step in VALID_PLAN["steps"]]}
         client = FakeClient(result=[invalid, VALID_PLAN])
         result = await TaskPlanAgent(client).generate_plan(
             task="准备路演", task_type="writing", friction="unclear_first_step", recipe_id=None,
         )
         self.assertEqual(result.source, "ai")
-        self.assertEqual(client.calls, 2)
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(result.plan.steps[0].max_minutes, 2)
 
     async def test_cognitively_heavy_first_step_is_repaired(self):
         heavy = {**VALID_PLAN, "steps": [
@@ -64,6 +65,16 @@ class TaskPlanAgentTest(unittest.IsolatedAsyncioTestCase):
             *VALID_PLAN["steps"][1:],
         ]}
         client = FakeClient(result=[heavy, VALID_PLAN])
+        result = await TaskPlanAgent(client).generate_plan(
+            task="准备路演", task_type="writing", friction="unclear_first_step", recipe_id=None,
+        )
+        self.assertEqual(result.source, "ai")
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(result.plan.steps[0].action, "打开目标文档")
+
+    async def test_complex_duplicate_issue_uses_one_model_repair(self):
+        duplicate = {**VALID_PLAN, "steps": [VALID_PLAN["steps"][0], VALID_PLAN["steps"][0], VALID_PLAN["steps"][2]]}
+        client = FakeClient(result=[duplicate, VALID_PLAN])
         result = await TaskPlanAgent(client).generate_plan(
             task="准备路演", task_type="writing", friction="unclear_first_step", recipe_id=None,
         )
