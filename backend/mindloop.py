@@ -193,14 +193,7 @@ class MindLoopService:
 
     @staticmethod
     def step_hint(task_type: str) -> str:
-        return {
-            "writing": "先不用写完整内容，把你最想表达的一句话小声说出来。",
-            "coding": "先不用改代码，只指出最可能相关的文件名。",
-            "communication": "先不用组织完整回复，只说出你最想让对方知道的一件事。",
-            "planning": "先不用排完整计划，只说出最先不能错过的那件事。",
-            "studying": "先不用理解全部内容，只找出这一页最醒目的一个词。",
-            "general": "先不用完成动作，只把手放到需要使用的工具旁边。",
-        }[task_type]
+        return "这一步已经很小了，试着完成它吧。"
 
     def start(
         self, *, task: str, friction: str, generated_plan: dict[str, Any] | None = None,
@@ -284,7 +277,7 @@ class MindLoopService:
                 session.hint = self.step_hint(session.task_type)
                 session.step_source = "hint"
                 self._record(session, "hint")
-                return {**self._response(session), "message": "这一步已经足够小，给你一个提示。"}
+                return {**self._response(session), "message": "这一步已经很小了，试着完成它吧。"}
             replacement = [smaller, original_current, *untouched_remaining]
         completed = session.steps[:session.current_step_index]
         new_steps = [

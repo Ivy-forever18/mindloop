@@ -99,8 +99,8 @@ The task is complete only after the final stored step is marked `done`.
 
 The frontend polls `GET /api/mindloop/session/{session_id}` after Stuck and
 applies a background AI refinement only if the user has not already moved on.
-After the local reduction limit is reached, the API returns a contextual `hint`
-instead of cycling through previous actions or deleting the remaining plan.
+After the local reduction limit is reached, the UI keeps the current action,
+encourages the user to try it, and hides the Stuck button instead of cycling.
 
 ## AI-generated task plans
 
